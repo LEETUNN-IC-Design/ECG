@@ -1,0 +1,41 @@
+# Simulation artifacts (không commit)
+*.vcd
+*.vvp
+transcript
+*.wlf
+*.shm
+*.asv
+*.jou
+work/
+work_base/
+base_*/
+base_*.vlog.log
+base_*.vsim.log
+tb/work/
+tb/*.vvp
+tb/*.vcd
+tb/transcript
+sim/work/
+
+# Synthesis output (không commit)
+synthesis/*.fs
+synthesis/*.json
+synthesis/*.html
+synthesis/*.rpt
+synthesis/impl/
+synthesis/pnr/
+
+# Python (golden model)
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Stale git worktree pointer (xem docs/baseline_step0.md)
+.git.stale-worktree-pointer
