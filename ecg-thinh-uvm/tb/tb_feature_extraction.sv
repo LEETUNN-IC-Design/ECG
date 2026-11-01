@@ -64,7 +64,8 @@ module tb_feature_extraction;
 
     task load_pattern;
         input integer n;
-        input integer kind;   // 0 = tuần tự 0..n-1, 1 = tất cả 0, 2 = tất cả 0xFF
+        input integer kind;   // 0=0..n-1, 1=all 0, 2=all 0xFF,
+                              // 3=const 10 (crest), 4=positive shape (zc)
         integer k;
         begin
             for (k = 0; k < 16; k = k + 1) begin
@@ -72,6 +73,9 @@ module tb_feature_extraction;
                     0:    pattern[k] = k[7:0];
                     1:    pattern[k] = 8'd0;
                     2:    pattern[k] = 8'hFF;
+                    3:    pattern[k] = 8'd10;          // const 10 (crest)
+                    4:    pattern[k] = (k%2==0) ? 8'd5 : 8'hFD; // alt sign (zc)
+                    5:    pattern[k] = 8'd20;          // const 20 (window B)
                     default: pattern[k] = 8'd0;
                 endcase
             end
@@ -272,6 +276,168 @@ module tb_feature_extraction;
             pass_count = pass_count + 1;
         end else begin
             $display("  FAIL: rr_ratio = %d, expected 4096 (division by zero!)", f_rr_ratio);
+        end
+
+        // ================================================================
+        // Test 5: Crest factor characterization (const signal, independent
+        //         expected values; documents as-implemented behavior)
+        // ================================================================
+        // 8 x 10: sum_square = 800 -> rms_calc = 800>>9 = 1.
+        // peak = 10 -> (10<<12)/1 = 40960 = 0xA000 -> 16-bit signed = -24576.
+        // (Probe scripts/probe/tb_crest_probe.sv confirms in Questa 10.7c the
+        //  expression is NOT truncated to 8 bits; 40960 propagates fully.
+        //  40960 is outside Q4.12 signed-16 range -> wraps. Behavior
+        //  documented here for owner decision.)
+        $display("\n[Test 5] Crest factor (const 10, rms_calc=1)");
+        test_count = test_count + 1;
+
+        load_pattern(8, 3);
+
+        @(posedge clk);
+        start_compute = 1;
+        @(posedge clk);
+        start_compute = 0;
+
+        wait_state_reached(4'd1, 100);
+        wait_state_reached(4'd6, 200);
+        @(posedge clk);
+        @(posedge clk);
+
+        $display("  RMS:    %d (expected 1)", f_rms);
+        $display("  PEAK:   %d (expected 10)", f_peak);
+        $display("  CREST:  %d (0x%0h)  [40960 wraps to -24576 in Q4.12]", f_crest, f_crest);
+
+        if (f_rms == 16'd1 && f_peak == 16'd10 && f_crest == 16'hA000) begin
+            $display("  PASS (crest behavior documented as -24576/0xA000)");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  FAIL: crest=%d (0x%0h), rms=%d, peak=%d",
+                     f_crest, f_crest, f_rms, f_peak);
+        end
+
+        // ================================================================
+        // Test 6: zc / half-ratio behavior on a pre-baseline-sign signal
+        //         (shows the feature math itself is alive; the on-chip
+        //         degeneration comes from upstream baseline clamping in
+        //         window_buffer, samples in [0,86] never set bit7)
+        // ================================================================
+        // 0..7: even idx = 5 (sign 0), odd idx = 0xFD (sign 1).
+        // zc = 7 transitions; pos_cnt = 4 -> f_half_ratio = 4<<3 = 32.
+        $display("\n[Test 6] zc/half-ratio on alternating sign pattern");
+        test_count = test_count + 1;
+
+        load_pattern(8, 4);
+
+        @(posedge clk);
+        start_compute = 1;
+        @(posedge clk);
+        start_compute = 0;
+
+        wait_state_reached(4'd1, 100);
+        wait_state_reached(4'd6, 200);
+        @(posedge clk);
+        @(posedge clk);
+
+        $display("  ZC:         %d (expected 7)", f_zc);
+        $display("  HALF_RATIO: %d (expected 32)", f_half_ratio);
+
+        if (f_zc == 16'd7 && f_half_ratio == 16'd32) begin
+            $display("  PASS");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  FAIL: zc=%d (exp 7), half_ratio=%d (exp 32)",
+                     f_zc, f_half_ratio);
+        end
+
+        // ================================================================
+        // Test 7 & 8: Two consecutive windows, DISTINCT data.
+        // Proves the 1-window-latency fix: window A (first after reset)
+        // must not use reset values; window B must not use window A's
+        // results. All three latency-affected features (f_rms, f_var,
+        // f_crest) are checked on each window.
+        //
+        // Expected values are INDEPENDENT: hand-computed from the
+        // accumulator formulas + Questa 10.7c width semantics
+        // (confirmed by scripts/probe/tb_feat_2win_probe.sv).
+        //
+        // IMPORTANT - crest semantics: in this toolchain the shift
+        // `(peak_reg <<< 12)` is evaluated in the assignment context
+        // (16 bits), i.e. the numerator is TRUNCATED to s16 before the
+        // division. So:
+        //   Window A = 8 x 10:  sum_sq=800, peak=10, mean=640
+        //     f_rms  = 800>>9            = 1
+        //     f_var  = 6400 - 100        = 6300
+        //     crest  = ((10*4096)&s16)/1 = 40960 & 0xFFFF = 0xA000 = -24576
+        //              (math intent: 10/1 = 10.0 -> 40960; 40960>s16max
+        //               so it wraps to -24576 -> WRONG VALUE, documented)
+        //   Window B = 8 x 20:  sum_sq=3200, peak=20, mean=1280
+        //     f_rms  = 3200>>9           = 6
+        //     f_var  = 25600 - 256       = 25200
+        //     crest  = ((20*4096)&s16)/6 = (81920&0xFFFF)/6 = 16384/6 = 2730
+        //              (math intent: 20/6 = 3.333 -> 13653; actual RTL
+        //               gives 2730 = 0.667 in Q4.12 -> WRONG VALUE,
+        //               expression-sizing defect, owner decision)
+        //
+        // These tests FREEZE THE CURRENT RTL BEHAVIOR (current formula +
+        // current truncation semantics); they do NOT assert the intended
+        // mathematical values (40960 / 13653), which would be the spec.
+        // Also note f_rms here is sum_of_squares>>9, not a true RMS.
+        // ================================================================
+        $display("\n[Test 7] Window A: 8 x 10 (first window after reset)");
+        test_count = test_count + 1;
+
+        load_pattern(8, 3);
+
+        @(posedge clk);
+        start_compute = 1;
+        @(posedge clk);
+        start_compute = 0;
+
+        wait_state_reached(4'd1, 100);
+        wait_state_reached(4'd6, 200);
+        @(posedge clk);
+        @(posedge clk);
+
+        $display("  f_rms  = %d (expected 1)",    f_rms);
+        $display("  f_var  = %d (expected 6300)", f_var);
+        $display("  f_crest= %d 0x%0h (expected -24576 / 0xA000)", f_crest, f_crest);
+
+        if (f_rms == 16'd1 && f_var == 16'd6300 && f_crest == 16'hA000) begin
+            $display("  PASS");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  FAIL: rms=%d var=%d crest=%d (0x%0h)",
+                     f_rms, f_var, f_crest, f_crest);
+        end
+
+        $display("\n[Test 8] Window B: 8 x 20 (second consecutive window)");
+        test_count = test_count + 1;
+
+        load_pattern(8, 5);
+
+        @(posedge clk);
+        start_compute = 1;
+        @(posedge clk);
+        start_compute = 0;
+
+        wait_state_reached(4'd1, 100);
+        wait_state_reached(4'd6, 200);
+        @(posedge clk);
+        @(posedge clk);
+
+        $display("  f_rms  = %d (expected 6)",     f_rms);
+        $display("  f_var  = %d (expected 25200)", f_var);
+        $display("  f_crest= %d 0x%0h (expected 2730/0xAAA as-RTL; spec-intent 13653/0x3585)",
+                 f_crest, f_crest);
+
+        // Freezes CURRENT RTL behavior (expression truncated to s16 before
+        // the division). Spec-intent value would be 13653 = 20*4096/6.
+        if (f_rms == 16'd6 && f_var == 16'd25200 && f_crest == 16'd2730) begin
+            $display("  PASS (crest frozen at as-RTL value 2730, spec-intent 13653)");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  FAIL: rms=%d var=%d crest=%d (0x%0h)",
+                     f_rms, f_var, f_crest, f_crest);
         end
 
         $display("\n========================================");

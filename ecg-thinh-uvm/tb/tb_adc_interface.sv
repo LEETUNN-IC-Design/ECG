@@ -35,13 +35,18 @@ module tb_adc_interface;
     // sample_valid sau khi pulse đã hết -> "valid = 0" giả FAIL).
     reg sv_seen;
     reg [7:0] sv_data;
-    initial begin sv_seen = 1'b0; sv_data = 8'h00; end
+    reg ov_seen;   // (fix tb) latch bắt pulse 1-chu kỳ adc_overflow
+    initial begin sv_seen = 1'b0; sv_data = 8'h00; ov_seen = 1'b0; end
     always @(posedge clk) begin
         if (!rst_n) begin
             sv_seen <= 1'b0;
-        end else if (sample_valid) begin
-            sv_seen <= 1'b1;
-            sv_data <= sample_out;
+            ov_seen <= 1'b0;
+        end else begin
+            if (sample_valid) begin
+                sv_seen <= 1'b1;
+                sv_data <= sample_out;
+            end
+            if (adc_overflow) ov_seen <= 1'b1;
         end
     end
 
@@ -156,7 +161,19 @@ module tb_adc_interface;
         $display("\n[Test 3] Overflow Detection");
         test_count = test_count + 1;
 
-        // Send data too fast (back-to-back)
+        // (fix tb) Bắt đầu với data_pending=0: forward 1 mẫu để chắc chắn
+        // pipeline sẵn sàng, rồi "flush" rate gate.
+        ov_seen = 1'b0;
+
+        // Gửi 1 mẫu đơn, đợi tick rate để forward (data_pending=0 -> không overflow)
+        @(posedge clk);
+        adc_data_in = 8'h01;
+        adc_data_valid = 1;
+        @(posedge clk);
+        adc_data_valid = 0;
+        repeat(150) @(posedge clk);   // đủ tick -> forward, data_pending=0
+
+        // Gửi data nhanh hơn tốc độ lấy mẫu (back-to-back) -> overflow_flag
         repeat(10) begin
             @(posedge clk);
             adc_data_in = 8'hAA;
@@ -165,12 +182,14 @@ module tb_adc_interface;
             adc_data_valid = 0;
         end
 
-        #100;
-        if (sample_valid) begin
-            $display("  PASS: Sample forwarded (overflow may have occurred)");
+        // Đợi tick rate kế tiếp để adc_overflow được báo (pulse 1 chu kỳ).
+        repeat(150) @(posedge clk);
+
+        if (ov_seen) begin
+            $display("  PASS: adc_overflow latched on back-to-back data");
             pass_count = pass_count + 1;
         end else begin
-            $display("  INFO: No sample forwarded during fast data");
+            $display("  FAIL: adc_overflow never asserted on back-to-back data");
         end
 
         // ================================================================

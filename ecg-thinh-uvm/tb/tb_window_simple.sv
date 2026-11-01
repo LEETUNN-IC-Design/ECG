@@ -47,7 +47,7 @@ module tb_window_simple;
         $dumpvars(0, tb_window_simple);
         $dumpvars(0, dut.enable);
         $dumpvars(0, dut.sample_valid);
-        $dumpvars(0, dut.write_counter);
+        $dumpvars(0, dut.write_ptr);
         $dumpvars(0, dut.window_ready);
     end
 
@@ -72,13 +72,13 @@ module tb_window_simple;
             sample_in = 8'hAA;
             sample_valid = 1;
             $display("t=%t enable=%b valid=%b counter=%d",
-                     $time, enable, sample_valid, dut.write_counter);
+                     $time, enable, sample_valid, dut.write_ptr);
             @(posedge clk);
             sample_valid = 0;
         end
 
         $display("After 10 samples: counter=%d samples=%d",
-                 dut.write_counter, samples_collected);
+                 dut.write_ptr, samples_collected);
 
         #100;
         $finish;

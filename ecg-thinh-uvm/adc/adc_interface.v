@@ -71,45 +71,40 @@ module adc_interface #(
     end
 
     // =============================================================================
-    // ADC Data Latching
+    // ADC Data Latching + Output Forwarding
     // =============================================================================
+    // One always block: data_pending/overflow_flag are driven in both the
+    // latch and forwarding sections, and Gowin synthesis rejects a net with
+    // two drivers (EX2000) even though Questa sim accepts it. Merged with the
+    // same section order (latch first, forwarding after) so last-writer
+    // semantics on a collision edge are unchanged; all reads see the
+    // pre-edge values in either form.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             adc_data_latch   <= {DATA_WIDTH{1'b0}};
             adc_valid_prev   <= 1'b0;
             data_pending     <= 1'b0;
             overflow_flag    <= 1'b0;
+            sample_out       <= {DATA_WIDTH{1'b0}};
+            sample_valid     <= 1'b0;
+            sample_count     <= 32'd0;
+            adc_overflow     <= 1'b0;
         end else begin
+            // Latch: rising edge on adc_data_valid
             adc_valid_prev <= adc_data_valid;
-
-            // Rising edge detection on data_valid
             if (adc_data_valid && !adc_valid_prev) begin
-                // New data arrived
                 if (!data_pending) begin
                     adc_data_latch <= adc_data_in;
-                    data_pending    <= 1'b1;
+                    data_pending   <= 1'b1;
                 end else begin
                     // Previous data not consumed - overflow!
-                    overflow_flag <= 1'b1;
+                    overflow_flag  <= 1'b1;
                 end
             end
-        end
-    end
 
-    // =============================================================================
-    // Output Data Forwarding
-    // =============================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            sample_out    <= {DATA_WIDTH{1'b0}};
-            sample_valid  <= 1'b0;
-            sample_count  <= 32'd0;
-            adc_overflow  <= 1'b0;
-        end else begin
+            // Forward output when rate tick occurs and data is pending
             sample_valid <= 1'b0;
             adc_overflow  <= 1'b0;
-
-            // Output data when rate tick occurs and data is pending
             if (rate_tick && data_pending) begin
                 sample_out   <= adc_data_latch;
                 sample_valid <= 1'b1;
@@ -118,7 +113,7 @@ module adc_interface #(
 
                 // Clear overflow flag after reporting
                 if (overflow_flag) begin
-                    adc_overflow <= 1'b1;
+                    adc_overflow  <= 1'b1;
                     overflow_flag <= 1'b0;
                 end
             end

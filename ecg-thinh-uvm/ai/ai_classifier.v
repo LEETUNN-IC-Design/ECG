@@ -300,7 +300,13 @@ module ai_classifier #(
                 S_RELU: begin
                     cnt <= cnt + 8'd1;
                     if (cnt < 8'd8) begin
-                        if (fc1_out_raw[cnt] > 32'd0) begin
+                        // (fix) fc1_out_raw[cnt] là SIGNED nhưng 32'd0 là
+                        // literal UNSIGNED -> so sánh mixed signed/unsigned
+                        // đổi fc1_out_raw sang unsigned: neuron âm (vd -8 =
+                        // 0xFFFFFFF8) bị đọc như 4294967288 > 0 -> vào nhánh
+                        // "dương" -> ReLU KHÔNG clamp (hidden giữ -8).
+                        // Dùng 32'sd0 (signed) để so sánh đúng kiểu.
+                        if (fc1_out_raw[cnt] > 32'sd0) begin
                             hidden_out[cnt] <= fc1_out_raw[cnt];
                             fc1_out[cnt] <= fc1_out_raw[cnt];
                         end else begin

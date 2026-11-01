@@ -17,7 +17,12 @@
 //  - Thêm soft_reset: đưa FSM về IDLE ngay lập tức.
 // =============================================================================
 
-module control_fsm (
+module control_fsm #(
+    // Overridable timeouts (defaults keep the shipped 50.4 MHz behavior).
+    // A TB may lower LOAD_TIMEOUT to exercise the hang-escape in seconds.
+    parameter [27:0] LOAD_TIMEOUT = 28'd100_000_000,
+    parameter [27:0] MLP_TIMEOUT  = 28'd10_000
+) (
     // Clock and Reset
     input  wire              clk,
     input  wire              rst_n,
@@ -64,10 +69,12 @@ module control_fsm (
 
     // Timeout cho state LOAD (đợi window_ready + feat_valid) và state FC1
     // (đợi mlp_done). Giá trị lớn hơn thời gian thực tế để không cắt ngang:
-    //   LOAD : 512 mẫu @360Hz ~ 1.42 s = ~71.6e6 chu kỳ -> dùng 100e6 (cần 27 bit)
-    //   FC1  : MLP ~161 chu kỳ -> dùng 10000
-    localparam [27:0] LOAD_TIMEOUT = 28'd100_000_000;
-    localparam [27:0] MLP_TIMEOUT  = 28'd10_000;
+    //   LOAD : 512 mẫu @360 Hz = 1.422 s (~71.7e6 chu kỳ @50.4 MHz) ->
+    //          LOAD_TIMEOUT = 100e6 chu kỳ = 1.984 s (cần 27 bit).
+    //          (Lưu ý: 140000 chu kỳ/sau mẩu @50.4 MHz = 2.778 ms, không phải 2.778 s.)
+    //   FC1  : MLP ~161 chu kỳ -> MLP_TIMEOUT = 10000.
+    // Cả hai giờ là module parameter (giá trị mặc định = hằng số 50.4 MHz
+    // trên; TB có thể hạ LOAD_TIMEOUT để kiểm hang-escape trong vài giây).
 
     // =============================================================================
     // State Registers

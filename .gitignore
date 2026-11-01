@@ -39,3 +39,8 @@ Thumbs.db
 
 # Stale git worktree pointer (xem docs/baseline_step0.md)
 .git.stale-worktree-pointer
+
+
+# Demo/sim scratch (không commit)
+simlib/
+logs/

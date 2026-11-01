@@ -103,6 +103,13 @@ module feature_extraction #(
     reg signed [31:0] rms_calc;
     reg signed [15:0] crest_calc;
 
+    // (fix) Combinational RMS so f_rms/f_crest reflect the current window.
+    wire signed [31:0] rms_now = $signed(sum_square[31:0] >> 9);
+    // (fix) Combinational variance, bit-exact to the original var_calc formula
+    //        (sum_sq<<<3) - (mean^2>>>12), so f_var reflects the current window
+    //        instead of the stale var_calc register.
+    wire signed [63:0] var_now = (sum_square <<< 3) - ((mean_val * mean_val) >>> 12);
+
     // =============================================================================
     // Main FSM
     // =============================================================================
@@ -113,7 +120,9 @@ module feature_extraction #(
             sample_cnt    <= 10'd0;
             read_en       <= 1'b0;
             feature_valid <= 1'b0;
-            overflow      <= 1'b0;
+            // overflow: reset only in the Overflow Detection block below
+            // (single driver for synthesis; dual-block reset is a Gowin
+            // EX2000 multiple-driver error, identical behavior in sim).
 
             // Reset all accumulators
             sum           <= 32'd0;
@@ -226,14 +235,19 @@ module feature_extraction #(
                     // (fix v3.0: loại so sánh signed/unsigned lẫn lộn)
                     if (sample_delayed > ecg_threshold[7:0] &&
                         sample_in     <= ecg_threshold[7:0]) begin
-                        // Peak đã qua -> ghi nhận RR
+                        // Peak đã qua -> ghi nhận RR (interval từ lần crossing trước).
                         rr_previous <= rr_current;
                         rr_current  <= rr_timer;
-                        rr_timer    <= 16'd0;
+                        rr_timer    <= 16'd0;   // reset: khoảng mới bắt đầu từ 0
+                    end else begin
+                        // (fix rr) guard: chỉ tăng khi KHÔNG có crossing ở chu
+                        // kỳ này. Trước đây rr_timer <= rr_timer+1 luôn chạy
+                        // (NBA last-wins) nên reset <=0 phía trên bị ghi đè ->
+                        // rr_timer thành index tuyệt đối, không phải RR interval.
+                        rr_timer <= rr_timer + 16'd1;
                     end
 
                     sample_delayed <= sample_in;
-                    rr_timer <= rr_timer + 16'd1;
 
                     // Next sample
                     sample_cnt  <= sample_cnt + 10'd1;
@@ -271,8 +285,11 @@ module feature_extraction #(
                 // Công thức giữ nguyên theo RTL gốc (quyết định owner)
                 // =============================================================
                 S_CALC_VAR: begin
-                    var_calc <= (sum_square <<< 3) - ((mean_val * mean_val) >>> 12);
-                    f_var <= $signed(var_calc[15:0]);
+                    // (fix) f_var now reflects the CURRENT window via the
+                    // combinational var_now (bit-exact to the original
+                    // var_calc formula). The old code read the NBA-updated
+                    // var_calc in the same cycle -> previous window (0 on 1st).
+                    f_var <= $signed(var_now[15:0]);
                     state <= S_CALC_RMS;
                 end
 
@@ -280,13 +297,15 @@ module feature_extraction #(
                 // CALC_RMS: Calculate RMS and Crest Factor
                 // =============================================================
                 S_CALC_RMS: begin
-                    // RMS (giữ công thức RTL gốc: truncation, không phải sqrt)
+                    // (fix) Use a combinational rms_now (same formula as the
+                    // registered rms_calc) so f_rms / f_crest reflect the
+                    // CURRENT window; the NBA rms_calc was one window stale.
                     rms_calc <= $signed(sum_square[31:0] >> 9);
-                    f_rms <= $signed(rms_calc[15:0]);
+                    f_rms <= $signed(rms_now[15:0]);
 
                     // Crest Factor = Peak / RMS (Q4.12, guard chia 0)
-                    if (rms_calc[15:0] > 16'd0) begin
-                        f_crest <= (peak_reg <<< 12) / rms_calc[15:0];
+                    if (rms_now[15:0] > 16'd0) begin
+                        f_crest <= (peak_reg <<< 12) / rms_now[15:0];
                     end else begin
                         f_crest <= 16'd0;
                     end

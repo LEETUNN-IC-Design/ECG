@@ -575,3 +575,50 @@ Các thay đổi này tuân thủ:
 - **Mục 4.7:** KHÔNG làm yếu testbench
 
 Phạm vi: D (file dùng chung) - cần owner D duyệt khi merge.
+
+---
+
+## 15. Quan Sát Synthesis Demo (`top_ecg_rom_demo`)
+
+**Ngày:** 2026-11-01 · **Tool:** Gowin 1.9.9 · **Part:** `GW5A-LV25UG324C2/I1` (id DB `gw5a25a-008`)
+**Phạm vi:** synthesis-only (netlist + tài nguyên ước tính). **Chưa P&R, chưa timing board, chưa nạp FPGA.**
+
+Chạy bằng `synthesis/run_demo_synth.bat` (gọi `GowinSynthesis.exe -i <13 file .v> -top top_ecg_rom_demo -sdc synthesis/demo_ecg_rom_demo.sdc -pn GW5A-LV25UG324C2/I1 -o synthesis/demo_out/top_ecg_rom_demo`).
+
+### 15.1 Kết quả: synthesis PASS, 0 error, có netlist
+- Netlist: `synthesis/demo_out/top_ecg_rom_demo` (text, ~755 KB). Muốn đuôi `.gv`/`.v` thì thêm flag `-oh top_ecg_rom_demo.v` cho `GowinSynthesis`.
+- Report: `*_syn.rpt.html`, `*_syn_resource.html`, `*_syn_rsc.xml`.
+- Trước khi PASS cần sửa **4 lỗi cấu trúc** (synth Gowin bắt chặt hơn Questa):
+  1. Lệnh thiếu `apb/apb_slave_if.v` (không phải lỗi code, do list `-i`).
+  2. `adc_interface`: net `data_pending` bị **2 block `always` cùng drive** → EX2000. Gộp 2 block (latch + forwarding) thành 1, giữ nguyên thứ tự section.
+  3. `feature_extraction`: net `overflow` bị block reset (FSM) + block detect cùng drive → EX2000. Xóa `overflow<=0` ở block FSM (block detect đã có reset).
+  4. `ecg_rom`: loop zero-init 2048 bước chạm giới hạn unroll của Gowin (EX3934 "loop count limit 2000 exceeded"). Bỏ loop (demo hex luôn đủ word, RAM read-only, slot thiếu = X trong sim, không đạt được trong demo).
+
+### 15.2 Tài nguyên (tổng `top_ecg_rom_demo`, từ `*_syn_rsc.xml`)
+| Nguồn | Giá trị | Ghi chú |
+|---|---|---|
+| Register | 974 | DSP MAC giữ state |
+| LUT | 2488 | |
+| ALU | 573 | |
+| BSRAM | 1 block | ROM ECG (2048×8) infer 1 block |
+| Ssram | 64 (bit) | window buffer circular RAM |
+| DSP / MULT | MULT12×12 = 1, MULT27×36 = 2 | chỉ 3 multiply (feature + MLP, weights=0 đã constant-fold nhiều MAC) |
+
+Module nặng nhất: `u_feature` (1556 LUT, 389 reg, giữ 3 MULT). `u_rom` chỉ = 1 BSRAM (thuần ROM). `u_ai` (MLP) = 145 reg / 219 LUT / 192 ALU, **không bị prune dù weights=0**.
+
+### 15.3 Kiểm tra checkpoint
+- **Latch / multi-driver: 0** (grep `latch|EX2000|EX1999` trên synth log = 0 dòng).
+- **Signedness:** preserved qua DSP + register (không warning về signedness); 3 MULT là MAC signed.
+- **MLP không bị tối ưu mất:** `u_ai` giữ FSM + ReLU (145 reg / 192 ALU). Weights=0 chỉ làm constant-fold bớt số MAC (3 MULT), **không** xoá logic → chạy `weight.hex` thật về sau không cần đổi cấu trúc. Không dùng con số 3 MULT làm "tài nguyên MLP" đại diện — con số này là ở chế độ weights=0.
+- **2 WARN chức năng (quan sát, chưa sửa):** `sys_overflow` input của `apb_slave_if` undriven → Gowin bắt buộc =0 (EX2565); `sys_busy` net không driver (EX1998). Chỉ ảnh hưởng STATUS register của APB (busy/overflow luôn báo 0), không ảnh hưởng pipeline/UART — demo không đọc STATUS nên an toàn. Ghi chú để sửa khi nối APB thật.
+- **Clock domain:** 1 clock `sys_clk` (pacer là clock-enable, không PLL) → không CDC, không latch.
+
+### 15.4 Constraint còn thiếu trước P&R (KHÔNG tự đoán)
+- **SDC** (`synthesis/demo_ecg_rom_demo.sdc`) hiện chỉ có **clock-only**: `create_clock -name sys_clk -period 20.0 [get_ports sys_clk]` (50 MHz, đúng confirmed). Chưa có constraint output (UART txd) / input (rxd) nếu cần.
+- **CHƯA CÓ file `.cst`** (pin + I/O voltage) trong repo — P&R bắt buộc có `.cst`. Gowin 1.9.9 iotable chỉ có GW1N/GW2A, **thiếu GW5A** → không sinh `.cst` pinmap tự động được cho part này.
+- **Conclusion timing board: KHÔNG có** — synthesis estimate ≠ post-P&R. Muốn timing thật phải: (1) xác nhận part/package/speed thật trên board ACG525, (2) có `.cst` pin + I/O voltage, (3) chạy P&R trong Gowin (tool hiện không đủ iotable GW5A để P&R local) → rồi đọc timing report post-P&R.
+- I/O voltage bank (LVCMOS33/18), cực tính reset/LED: **chưa confirm** — không đoán.
+
+### 15.5 Chưa nạp FPGA
+Chưa generate bitstream, chưa flash board. Demo chỉ chứng minh synthesis netlist + tài nguyên; chạy thật cần §15.4 hoàn tất.
+

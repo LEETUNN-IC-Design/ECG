@@ -155,6 +155,55 @@ module tb_top_ecg_classifier;
         if (irq) irq_seen <= 1'b1;
     end
 
+    // (fix tb) UART RX decoder (8N1 LSB-first) trên uart_txd, baud_div=437:
+    //  - half-bit = 218 (trễ nửa bit để sample giữa bit), full bit = 437.
+    //  - bắt falling edge = start bit; sample data0..data7, stop bit.
+    //  - byte_val = 8 data bits (LSB-first, LSB ở bit0); rx_ok = stop bit==1.
+    //  - byte_val/rx_ok giữ nguyên sau khi xong khung -> TB đọc sau vẫn đúng.
+    localparam [15:0] UART_HALF = 16'd218;  // 437/2
+    localparam [15:0] UART_BIT  = 16'd437;
+    reg [7:0] rx_bit;
+    reg [7:0] byte_val;
+    reg [3:0] rx_bit_idx;
+    reg [15:0] rx_cnt;
+    reg        rx_in_frame;
+    reg        rx_prev;
+    reg        rx_ok;
+    initial begin
+        rx_bit=8'd0; byte_val=8'd0; rx_bit_idx=4'd0;
+        rx_cnt=16'd0; rx_in_frame=1'b0; rx_prev=1'b1; rx_ok=1'b0;
+    end
+    always @(posedge sys_clk) begin
+        rx_prev <= uart_txd;
+        if (!rx_in_frame) begin
+            // Idle: chờ falling edge (start bit). data0 bắt đầu 1 bit sau,
+            // nên sample data0 ở nửa bit của data0 = BIT+HALF kể từ cạnh.
+            if (rx_prev === 1'b1 && uart_txd === 1'b0) begin
+                rx_in_frame <= 1'b1;
+                rx_bit_idx  <= 4'd0;
+                rx_cnt      <= UART_BIT + UART_HALF;
+            end
+        end else begin
+            if (rx_cnt != 16'd0) begin
+                rx_cnt <= rx_cnt - 16'd1;
+            end else begin
+                // Điểm sample: bit hiện tại ở vị trí rx_bit_idx (0..7 data, 8 stop)
+                if (rx_bit_idx < 4'd8)
+                    rx_bit[rx_bit_idx[2:0]] <= uart_txd;
+                if (rx_bit_idx == 4'd8) begin
+                    // vừa sample stop bit
+                    rx_ok       <= (uart_txd === 1'b1);
+                    byte_val    <= rx_bit;
+                    rx_in_frame <= 1'b0;
+                    rx_bit_idx  <= 4'd0;
+                end else begin
+                    rx_bit_idx <= rx_bit_idx + 4'd1;
+                    rx_cnt     <= UART_BIT;
+                end
+            end
+        end
+    end
+
     // =============================================================================
     // Test Sequence
     // =============================================================================
@@ -162,6 +211,7 @@ module tb_top_ecg_classifier;
     integer pass_count;
     reg [31:0] read_data;
     integer i;
+    integer uwait;
 
     initial begin
         $display("========================================");
@@ -300,18 +350,33 @@ module tb_top_ecg_classifier;
         // ================================================================
         // Test 6: Status Register Check
         // ================================================================
-        $display("\n[Test 6] Status Register");
+        $display("\n[Test 6] Status Register + UART byte");
         test_count = test_count + 1;
 
         apb_read(32'h04, read_data);
         $display("  STATUS = 0x%h", read_data);
         $display("    busy   = %b", read_data[0]);
         $display("    done   = %b", read_data[1]);
-        $display("    error  = %b", read_data[2]);
         $display("    overflow = %b", read_data[3]);
 
-        $display("  PASS: Status readable");
-        pass_count = pass_count + 1;
+        // (fix tb) Decode byte UART thật trên uart_txd (không chỉ nhìn
+        // uart_send): khung = {6'b0, class_code}, 8 data bit LSB-first.
+        // Đợi rx_ok (stop bit của khung) với guard timeout.
+        uwait = 0;
+        while (rx_ok === 1'b0 && uwait < 200000) begin
+            @(posedge sys_clk);
+            uwait = uwait + 1;
+        end
+        $display("  UART byte = 0x%02h (rx_ok=%b), expected = 0x%02h {6'b0,class=%b}",
+                 byte_val, rx_ok, {6'b0, read_data[1:0]}, read_data[1:0]);
+
+        if (rx_ok && byte_val === {6'b0, read_data[1:0]}) begin
+            $display("  PASS: Status readable + UART byte matches class_code");
+            pass_count = pass_count + 1;
+        end else begin
+            $display("  FAIL: UART byte=0x%02h rx_ok=%b, expected 0x%02h",
+                     byte_val, rx_ok, {6'b0, read_data[1:0]});
+        end
 
         // ================================================================
         // Test 7: Status LEDs Check
