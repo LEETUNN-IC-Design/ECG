@@ -33,10 +33,11 @@ DEFAULT_DAT = HERE / "data" / "mitbih_100.dat"
 def read_channel(dat: Path, channel: int, n_channels: int = 2):
     """Return the full list of SIGNED 12-bit samples for one channel.
 
-    WFDB 212: every 3 bytes hold 2 signed 12-bit samples, two's complement.
-    Sample s (channel 0 first within a 3-byte group) decodes as:
-      s0 = b0 | ((b1 & 0x0F) << 8)      # 12 bits
-      s1 = ((b1 & 0xF0) >> 4) | (b2 << 4)
+    WFDB 212: every 3 bytes [b0 b1 b2] hold 2 signed 12-bit samples, two's
+    complement. byte0 = sample A (ch0) low 8 bits; byte1's LOW nibble = ch0
+    top 4 bits; byte1's HIGH nibble = ch1 top 4 bits; byte2 = ch1 low 8 bits.
+      s0 = b0 | ((b1 & 0x0F) << 8)      # ch0: low byte + high nibble
+      s1 = b2 | ((b1 & 0xF0) << 4)      # ch1: low byte + high nibble
     A code >= 2048 is negative (12-bit two's complement). Channels interleave
     sample-by-sample, so channel c is every n_channels-th sample from offset c.
 
@@ -58,7 +59,7 @@ def read_channel(dat: Path, channel: int, n_channels: int = 2):
     for g in range(ngroups):
         b0, b1, b2 = raw[3 * g], raw[3 * g + 1], raw[3 * g + 2]
         s0 = b0 | ((b1 & 0x0F) << 8)
-        s1 = ((b1 & 0xF0) >> 4) | (b2 << 4)
+        s1 = b2 | ((b1 & 0xF0) << 4)
         c0 = s0 - 4096 if s0 >= 2048 else s0
         c1 = s1 - 4096 if s1 >= 2048 else s1
         out.append([c0, c1][channel])

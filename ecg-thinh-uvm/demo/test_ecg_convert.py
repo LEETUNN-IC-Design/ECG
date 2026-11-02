@@ -20,9 +20,13 @@ spec.loader.exec_module(cv)
 read_channel = cv.read_channel
 
 
-# 6 sample-pairs (3-byte groups). ch0 = group sample 0, ch1 = group sample 1.
-# Groups: a=+0/+255, +100/+1, +2047/+1, -1/-1, -50/0, -2048/-2048
-FIX212 = bytes.fromhex("00F00F 641000 FF1700 FFFFFF CE0F00 000880".replace(" ", ""))
+# 6 sample-pairs (3-byte groups), packed under the CORRECT 212 layout by hand
+# (independent of read_channel): b0=ch0 low8, b1=ch0 high4 | ch1 high4,
+# b2=ch1 low8. Groups: +0/+255, +100/+1, +2047/+1, -1/-1, -50/0, -2048/-2048
+# The literal bytes are hand-derived, NOT produced by any pack/unpack helper;
+# verified: the correct decoder recovers all 6 pairs, the OLD formula
+# `((b1&0xF0)>>4)|(b2<<4)` gets ch1 wrong on 4/6 -> this fixture catches it.
+FIX212 = bytes.fromhex("0000FF 640001 FF0701 FFFFFF CE0F00 008800".replace(" ", ""))
 CH0_EXPECT = [0, 100, 2047, -1, -50, -2048]
 CH1_EXPECT = [255, 1, 1, -1, 0, -2048]
 
@@ -96,7 +100,7 @@ def _unpack212_independent(raw: bytes):
         b1 = raw[3 * i + 1]
         b2 = raw[3 * i + 2]
         s0 = b0 | ((b1 & 0x0F) << 8)
-        s1 = ((b1 & 0xF0) >> 4) | (b2 << 4)
+        s1 = b2 | ((b1 & 0xF0) << 4)
         append0(s0 - 4096 if s0 >= 2048 else s0)
         append1(s1 - 4096 if s1 >= 2048 else s1)
     return c0, c1
@@ -106,16 +110,21 @@ def test_real_data_independent_212(tmp):
     assert REAL_DAT.exists() and REAL_HEA.exists(), "real data/.hea not present"
     raw = REAL_DAT.open("rb").read()
 
-    # .hea ground truth (external):  "100 2 360 650000" + per-channel lines.
+    # .hea ground truth (external, written by the official WFDB tools from
+    # their own decode of THIS file): "100 2 360 650000" + per-channel lines.
+    # Per-channel fields: "<file> 212 <gain> <nbits> <baseoff> <baseval=first
+    # sample> <scale=sum-of-samples mod 2^16> <zerobased> <label>"
     hea_lines = REAL_HEA.read_text().splitlines()
     hdr = hea_lines[0].split()
     nch = int(hdr[1])
     nsamp = int(hdr[3])
-    ch_line = next(l for l in hea_lines if l.startswith(hdr[0] + ".dat"))
-    f = ch_line.split()
-    hea_gain_mlII = int(f[2])       # 200 units/mV
-    hea_zero_mlII = int(f[4])       # 1024 = ADC zero (11 data bits)
-    hea_initial_mlII = int(f[5])    # 995 = initial value
+    # Parse EVERY channel line into {label: (baseval, scale)}
+    per_ch = {}
+    for l in hea_lines:
+        f = l.split()
+        if len(f) >= 8 and f[1] == "212":
+            per_ch[f[-1]] = {"baseval": int(f[5]), "scale": int(f[6])}
+    assert len(per_ch) == nch, (per_ch, nch)
 
     # 1) whole-record integrity: file size == packed bytes for nsamp/ch.
     expect_bytes = nch * nsamp * 12 // 8
@@ -125,25 +134,28 @@ def test_real_data_independent_212(tmp):
     c0, c1 = _unpack212_independent(raw)
     assert len(c0) == nsamp and len(c1) == nsamp, (len(c0), nsamp)
 
-    # 3) ch0[0] == .hea initial value (external, not decoder-produced).
-    assert c0[0] == hea_initial_mlII, (c0[0], hea_initial_mlII)
-
-    # 4) full-channel checksum fingerprints (record, not assert) for a later
-    #    byte-exact WFDB cross-check. 64-bit Fletcher-style running sum.
-    def checksum(ch):
-        s = 0
-        for x in ch:
-            s = (s + x) & 0xFFFFFFFFFFFFFFFF
-        return f"{s:016X}"
-    print(f"PASS real_data_independent_212 "
-          f"(size={len(raw)}={nch}x{nsamp}x12/8, ch0[0]={c0[0]}==init "
-          f"{hea_initial_mlII}, ch1[0]={c1[0]})")
-    print(f"      ch0 checksum(fingerprint)={checksum(c0)}  "
-          f"ch1 checksum(fingerprint)={checksum(c1)}  "
-          f"[for later WFDB byte-exact diff]")
-    # NOTE (limit): ch1[0] ({c1[0]}) is NOT asserted against .hea V5 baseval
-    # because no official WFDB reference is available to confirm it; ch0 (MLII)
-    # is the pipeline's input, and it matches. Recorded as an open limit.
+    # 3) EVERY channel: initial value == .hea baseval  AND  full-channel sum
+    #    mod 65536 == .hea scale field. This is the external, decoder-
+    #    independent proof that the 212 unpack is correct on BOTH channels.
+    #    (A wrong second-sample layout still matches ch0 but silently breaks
+    #    ch1 -- asserting both channels catches it.)
+    chans = {"MLII": c0, "V5": c1}
+    for label, ch in chans.items():
+        exp_base, exp_scale = per_ch[label]["baseval"], per_ch[label]["scale"]
+        got_base, got_scale = ch[0], (sum(ch) & 0xFFFF)
+        # sum(ch)&0xFFFF may be >32767 for a positive scale; .hea stores the
+        # signed 16-bit value, so compare as signed 16-bit.
+        got_scale_s = got_scale - 65536 if got_scale >= 32768 else got_scale
+        assert ch[0] == exp_base, \
+            f"{label}: first sample {ch[0]} != .hea baseval {exp_base}"
+        assert got_scale_s == exp_scale, \
+            f"{label}: sum mod 2^16 = {got_scale_s} (0x{got_scale:04X}) != " \
+            f".hea scale {exp_scale}"
+        print(f"PASS {label}: n={len(ch)} first={ch[0]}==baseval {exp_base}, "
+              f"sum16={got_scale_s}==scale {exp_scale} (0x{got_scale:04X})")
+    # NOTE: .hea fields are external ground truth, NOT produced by this
+    # decoder; a byte-exact diff vs the official WFDB reader is still a
+    # separate (optional) confirmation, recorded in AUTOMATION_STATUS §11.
 
 
 def main(tmpdir):

@@ -519,11 +519,22 @@ without permission. Without it, the 212 framing was checked against the
 decoder's own output:
 - file-size 1 950 000 B ≡ 650 000×2×12/8 (whole-record integrity);
 - decoded sample count per channel = 650 000 = `.hea` `nsamp`;
-- ch0[0] = 995 = `.hea` MLII **initial value** (and, for the record, ch1[0]
-  decodes to −205, which does **not** match `.hea` V5 baseval 1011 — ch1 is
-  unused by the pipeline; flagged, not asserted, because I cannot confirm it
-  without the official 212 decoder);
-- a reproducible per-channel byte fingerprint is recorded in §11.6 below.
+- **both channels assert against `.hea` check-fields** (external, written by
+  the official WFDB tools from their own decode of this exact file): ch0 (MLII)
+  initial = 995 = `.hea` baseval **and** channel-sum mod 2¹⁶ = 0xA98D = `.hea`
+  scale −22131; ch1 (V5) initial = 1011 = `.hea` baseval **and** channel-sum
+  mod 2¹⁶ = 0x4E54 = `.hea` scale 20052.
+- **Decoder bug found & fixed (2026-11-02, channel 1):** the shipped 212
+  second-sample formula `ch1 = ((b1&0xF0)>>4)|(b2<<4)` placed byte2 as the
+  *high* byte of sample 1, giving ch1[0]=−205 and sum 0x570C — wrong. The
+  correct layout is `ch1 = b2|((b1&0xF0)<<4)` (byte1 high nibble = ch1 top-4,
+  byte2 = ch1 low-8, i.e. each 12-bit sample stored low-byte-first). Only that
+  layout reproduces BOTH V5 `.hea` invariants. ch0's formula was already
+  correct (matches MLII baseval + scale), which is why ch0 PASS masked the ch1
+  error. Both `demo/ecg_convert.py::read_channel` and the test's independent
+  unpacker are fixed; `test_real_data_independent_212` now asserts baseval +
+  scale for **both** channels, so a regressed layout FAILs rather than printing
+  a fingerprint.
 None of this *replaces* a byte-exact WFDB diff. To close it before board,
 `python -m pip install wfdb` (or WFDB MATLAB), then diff the first N samples
 of `wfdb.read` vs `ecg_convert.read_channel` on **both** channels over the
@@ -531,16 +542,16 @@ head and the 1000..3047 segment — a ~10-minute check, not yet run. No RR,
 heart-rate, or rhythm label is asserted anywhere in this project from RTL
 threshold crossings.
 
-### 11.6 Decoder-independent per-channel integrity fingerprint
-Computed in `demo/test_ecg_convert.py::test_real_data_independent_212`
-(self-contained 212 unpack, NOT `read_channel`; over the full 650 000-sample
-channels) and cross-checked against the external `.hea`. 64-bit running sum:
-- ch0 (MLII): 650 000 samples; int12 sum = 0x00000000_254CA98D; ch0[0] = 995
-  (= .hea initial value).
-- ch1 (V5): 650 000 samples; int12 sum = 0xFFFFFFFF_E7C8570C; ch1[0] = −205.
-- Whole-record: 1 950 000 B = 2 × 650 000 × 12 / 8 (integrity OK).
-These are self-consistency / `.hea`-consistency numbers, **not** an external
-byte-exact validity check — that still needs official WFDB (§11.5). `ch1[0]`
-is deliberately not asserted against `.hea` V5 (no reference to confirm it);
-ch0 is the pipeline input and matches.
+### 11.6 Decoder-independent per-channel integrity (asserted, both channels)
+`demo/test_ecg_convert.py::test_real_data_independent_212` uses a
+self-contained 212 unpack (NOT `read_channel`) and, for **both** channels,
+asserts two external `.hea` invariants — first sample = `.hea` baseval and
+full-channel sum mod 2¹⁶ = `.hea` `scale` field:
+- ch0 (MLII): n = 650 000; ch0[0] = 995 = baseval; sum16 = 0xA98D = −22131 = scale.
+- ch1 (V5):  n = 650 000; ch1[0] = 1011 = baseval; sum16 = 0x4E54 = 20052 = scale.
+Both PASS. A 650 000-sample full-channel sum matching the `.hea` `scale`
+field independently of the first sample is a strong (not just "fingerprint")
+confirmation that the unpack is correct on both channels. The `.hea` fields are
+external (written by the official WFDB tools); a byte-exact diff against the
+official `wfdb` reader remains an optional extra check (§11.5), not yet run.
 
